@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Admin Login — Device Ledger</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div class="wrap" style="max-width:420px;padding-top:80px;">
+
+  <header style="border-bottom:none;margin-bottom:20px;">
+    <div>
+      <p class="eyebrow">Restricted area</p>
+      <h1>Admin <span>Login</span></h1>
+      <p class="sub">Only the ledger owner can view devices, add entries, or generate check-in links. Device holders never need this page.</p>
+    </div>
+  </header>
+
+  <div class="panel">
+    <div class="field">
+      <label for="fUser">Username</label>
+      <input id="fUser" autocomplete="username">
+    </div>
+    <div class="field">
+      <label for="fPass">Password</label>
+      <input id="fPass" type="password" autocomplete="current-password">
+    </div>
+    <div class="actions">
+      <button class="btn-primary" id="loginBtn">Log in</button>
+    </div>
+    <p class="imei-note" id="errLine" style="margin-top:14px;color:var(--danger);"></p>
+  </div>
+
+  <footer>DEVICE LEDGER · admin session lasts 12 hours or until you log out</footer>
+</div>
+
+<script>
+(function(){
+  const fUser = document.getElementById('fUser');
+  const fPass = document.getElementById('fPass');
+  const errLine = document.getElementById('errLine');
+
+  async function doLogin(){
+    errLine.textContent = '';
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ username: fUser.value.trim(), password: fPass.value })
+    });
+    const data = await res.json().catch(() => ({}));
+    if(!res.ok){
+      errLine.textContent = data.error || 'Login failed.';
+      return;
+    }
+    location.href = '/';
+  }
+
+  document.getElementById('loginBtn').addEventListener('click', doLogin);
+  fPass.addEventListener('keydown', (e) => { if(e.key === 'Enter') doLogin(); });
+  fUser.focus();
+})();
+</script>
+</body>
+</html>

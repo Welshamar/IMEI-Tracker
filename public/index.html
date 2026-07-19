@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Device Ledger — IMEI, Spec &amp; Location Tracker</title>
+<link rel="stylesheet" href="shared.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <p class="eyebrow">Local device manifest</p>
+      <h1>Device <span>Ledger</span></h1>
+      <p class="sub">Log model, OS, serial, IMEI, phone and email for phones you manage. Locations are never looked up — each device reports its own position only after its holder opens a check-in link and grants permission.</p>
+    </div>
+    <nav class="tabs">
+      <a href="index.html" class="active">Ledger</a>
+      <a href="checkin.html">Device check-in</a>
+      <a href="#" id="logoutLink">Log out</a>
+    </nav>
+  </header>
+
+  <div class="banner banner-info">
+    <b>How location works here:</b> this page never queries a phone number, IMEI or email to find a device.
+    Each entry below gets a unique check-in link — send it to whoever holds that device. When <i>they</i> open it
+    and tap "share location," their browser reports its own GPS coordinates, which show up here as a
+    "suspected location" circle sized to the GPS accuracy reported by that device.
+  </div>
+
+  <div class="panel">
+    <p class="panel-title">Add entry</p>
+    <div class="grid">
+      <div class="field">
+        <label for="fName">Device name / label</label>
+        <input id="fName" placeholder="e.g. My Galaxy A10">
+      </div>
+      <div class="field">
+        <label for="fModel">Model number</label>
+        <input id="fModel" placeholder="e.g. SM-A105FN/DS">
+      </div>
+      <div class="field">
+        <label for="fOS">OS / version</label>
+        <input id="fOS" placeholder="e.g. Android 11, One UI 3.1">
+      </div>
+      <div class="field">
+        <label for="fSerial">Serial number</label>
+        <input id="fSerial" placeholder="e.g. RF8N90ABCDE">
+      </div>
+      <div class="field">
+        <label for="fPhone">Phone number</label>
+        <input id="fPhone" placeholder="e.g. +1 555 010 2020">
+      </div>
+      <div class="field">
+        <label for="fEmail">Owner email</label>
+        <input id="fEmail" placeholder="e.g. owner@example.com">
+      </div>
+    </div>
+    <div class="field">
+      <label for="fIMEI">IMEI (15 digits)</label>
+      <input id="fIMEI" maxlength="17" placeholder="e.g. 490154203237518">
+    </div>
+
+    <div class="imei-strip" id="imeiStrip">
+      <div class="digit-row" id="digitRow"></div>
+      <div id="imeiVerdict"></div>
+      <p class="imei-note">Checked with the Luhn algorithm — the same checksum IMEI numbers are built with. This confirms the number is a well-formed IMEI, not that it's registered to a real device.</p>
+    </div>
+
+    <div class="actions">
+      <button class="btn-primary" id="addBtn">Save to ledger</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <p class="panel-title">Map <span id="mapCountLabel" style="color:var(--muted);font-weight:400;"></span></p>
+    <div id="map"></div>
+    <p class="map-note">Basemap: OpenStreetMap. Circles mark each device's most recent self-reported check-in; radius = reported GPS accuracy (meters), so a bigger circle means a coarser fix, not a bigger area actually visited.</p>
+  </div>
+
+  <div class="panel">
+    <p class="panel-title">Ledger <span id="countLabel" style="color:var(--muted);font-weight:400;"></span></p>
+    <div class="search">
+      <input id="searchBox" placeholder="Filter by name, model, serial, phone, email or IMEI…">
+    </div>
+    <div id="logList"></div>
+  </div>
+
+  <div class="panel">
+    <p class="panel-title">Account</p>
+    <div class="grid">
+      <div class="field">
+        <label for="fCurPass">Current password</label>
+        <input id="fCurPass" type="password" autocomplete="current-password">
+      </div>
+      <div class="field">
+        <label for="fNewPass">New password (min 8 characters)</label>
+        <input id="fNewPass" type="password" autocomplete="new-password">
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn-ghost" id="changePassBtn">Change password</button>
+    </div>
+    <p class="imei-note" id="passMsg"></p>
+  </div>
+
+  <footer>DEVICE LEDGER · data stored in a local server-side file · locations are self-reported only</footer>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function(){
+
+  // ---- IMEI Luhn visualizer (client-side preview only; server re-validates) ----
+  function luhnCheck(digits){
+    let sum = 0;
+    const contrib = [];
+    for(let i=0;i<14;i++){
+      let d = digits[i];
+      const doubled = (i % 2 === 1);
+      if(doubled){ d = d*2; if(d>9) d -= 9; }
+      contrib.push({val:digits[i], doubled});
+      sum += d;
+    }
+    const checkDigit = (10 - (sum % 10)) % 10;
+    contrib.push({val:digits[14], doubled:false, isCheck:true});
+    return { valid: checkDigit === digits[14], checkDigit, contrib };
+  }
+
+  function renderIMEIVisual(raw){
+    const digitsOnly = raw.replace(/\D/g,'');
+    const strip = document.getElementById('imeiStrip');
+    const row = document.getElementById('digitRow');
+    const verdictEl = document.getElementById('imeiVerdict');
+    if(digitsOnly.length !== 15){
+      strip.classList.remove('show');
+      return;
+    }
+    strip.classList.add('show');
+    const digits = digitsOnly.split('').map(Number);
+    const result = luhnCheck(digits);
+    row.innerHTML = result.contrib.map(c => {
+      let cls = 'digit';
+      if(c.doubled) cls += ' doubled';
+      if(c.isCheck) cls += ' check';
+      return `<div class="${cls}">${c.val}</div>`;
+    }).join('');
+    verdictEl.innerHTML = result.valid
+      ? `<span class="imei-verdict verdict-valid">✓ VALID FORMAT — checksum matches</span>`
+      : `<span class="imei-verdict verdict-invalid">✕ INVALID — checksum expects ${result.checkDigit}</span>`;
+  }
+
+  document.getElementById('fIMEI').addEventListener('input', (e) => renderIMEIVisual(e.target.value));
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function fmtTime(ts){
+    if(!ts) return '—';
+    const d = new Date(ts);
+    return d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}) + ' · ' +
+           d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+  }
+
+  // ---- Map ----
+  const map = L.map('map').setView([20, 0], 2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map);
+  let mapLayers = [];
+
+  function renderMap(entries){
+    mapLayers.forEach(l => map.removeLayer(l));
+    mapLayers = [];
+    const withLoc = entries.filter(e => e.lastLocation);
+    document.getElementById('mapCountLabel').textContent = withLoc.length ? `(${withLoc.length} reporting)` : '(no check-ins yet)';
+    if(!withLoc.length) return;
+
+    const bounds = [];
+    withLoc.forEach(e => {
+      const { lat, lon, accuracy, ts } = e.lastLocation;
+      bounds.push([lat, lon]);
+      const marker = L.circleMarker([lat, lon], {
+        radius: 6, color: '#5EEAD4', fillColor: '#5EEAD4', fillOpacity: 0.9, weight: 2
+      }).addTo(map);
+      marker.bindPopup(
+        `<b>${escapeHtml(e.name || e.model || 'Unnamed device')}</b><br>` +
+        `Suspected location as of ${fmtTime(ts)}<br>` +
+        (accuracy ? `Accuracy: ±${Math.round(accuracy)} m` : 'Accuracy: unknown')
+      );
+      mapLayers.push(marker);
+      if(accuracy){
+        const circle = L.circle([lat, lon], {
+          radius: accuracy, color: '#F0A93E', weight: 1, fillColor: '#F0A93E', fillOpacity: 0.08
+        }).addTo(map);
+        mapLayers.push(circle);
+      }
+    });
+    if(bounds.length === 1){
+      map.setView(bounds[0], 15);
+    } else {
+      map.fitBounds(bounds, { padding: [30,30] });
+    }
+  }
+
+  // ---- Auth ----
+  document.getElementById('logoutLink').addEventListener('click', async (e) => {
+    e.preventDefault();
+    await fetch('/api/logout', { method: 'POST' });
+    location.href = '/login.html';
+  });
+
+  document.getElementById('changePassBtn').addEventListener('click', async () => {
+    const passMsg = document.getElementById('passMsg');
+    const currentPassword = document.getElementById('fCurPass').value;
+    const newPassword = document.getElementById('fNewPass').value;
+    const res = await fetch('/api/change-password', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ currentPassword, newPassword })
+    });
+    const data = await res.json().catch(() => ({}));
+    if(!res.ok){
+      passMsg.style.color = 'var(--danger)';
+      passMsg.textContent = data.error || 'Could not change password.';
+      return;
+    }
+    passMsg.style.color = 'var(--teal)';
+    passMsg.textContent = 'Password updated.';
+    document.getElementById('fCurPass').value = '';
+    document.getElementById('fNewPass').value = '';
+  });
+
+  // ---- Data ----
+  let entries = [];
+
+  async function loadEntries(){
+    const res = await fetch('/api/entries');
+    if(res.status === 401){
+      location.href = '/login.html';
+      return;
+    }
+    entries = await res.json();
+    renderLog();
+    renderMap(entries);
+  }
+
+  function renderLog(filter){
+    const list = document.getElementById('logList');
+    const countLabel = document.getElementById('countLabel');
+    let shown = entries;
+    if(filter){
+      const f = filter.toLowerCase();
+      shown = entries.filter(e =>
+        (e.name||'').toLowerCase().includes(f) ||
+        (e.model||'').toLowerCase().includes(f) ||
+        (e.serial||'').toLowerCase().includes(f) ||
+        (e.phone||'').toLowerCase().includes(f) ||
+        (e.email||'').toLowerCase().includes(f) ||
+        (e.imei||'').toLowerCase().includes(f)
+      );
+    }
+    countLabel.textContent = entries.length ? `(${entries.length})` : '';
+
+    if(!entries.length){
+      list.innerHTML = `<div class="log-empty">No entries yet. Add a device above to start the ledger.</div>`;
+      return;
+    }
+    if(!shown.length){
+      list.innerHTML = `<div class="log-empty">No matches for that filter.</div>`;
+      return;
+    }
+
+    list.innerHTML = shown.map(e => {
+      let tag = '<span class="tag tag-na">NO IMEI</span>';
+      if(e.imei){
+        tag = e.imeiValid
+          ? '<span class="tag tag-valid">IMEI OK</span>'
+          : '<span class="tag tag-invalid">IMEI BAD</span>';
+      }
+      const locTag = e.lastLocation
+        ? `<span class="tag tag-live">LAST SEEN ${fmtTime(e.lastLocation.ts)}</span>`
+        : '<span class="tag tag-na">NO CHECK-IN</span>';
+
+      const key = e.serial ? {type:'serial', value:e.serial}
+        : e.email ? {type:'email', value:e.email}
+        : e.imei ? {type:'imei', value:e.imei}
+        : e.phone ? {type:'phone', value:e.phone}
+        : null;
+      const checkinUrl = key
+        ? `${location.origin}/checkin.html?type=${key.type}&value=${encodeURIComponent(key.value)}`
+        : null;
+
+      return `
+        <div class="entry">
+          <div class="name">${escapeHtml(e.name || 'Unnamed device')}${locTag}</div>
+          <div class="field-val">Model<br><b>${escapeHtml(e.model||'—')}</b></div>
+          <div class="field-val">OS<br><b>${escapeHtml(e.os||'—')}</b></div>
+          <div class="field-val">Phone / Email<br><b>${escapeHtml(e.phone||'—')}</b> · <b>${escapeHtml(e.email||'—')}</b></div>
+          <div>${tag}</div>
+          <button class="del" data-id="${e.id}" title="Delete entry">✕</button>
+          ${checkinUrl ? `
+          <div class="checkin-link" style="grid-column:1 / -1;">
+            Check-in link for this device: <code>${escapeHtml(checkinUrl)}</code>
+            <button class="copy-btn" data-url="${escapeHtml(checkinUrl)}">Copy</button>
+          </div>` : ''}
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.del').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await fetch('/api/entries/' + btn.dataset.id, { method: 'DELETE' });
+        await loadEntries();
+        renderLog(document.getElementById('searchBox').value);
+      });
+    });
+    list.querySelectorAll('.copy-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        navigator.clipboard.writeText(btn.dataset.url).then(() => {
+          const old = btn.textContent;
+          btn.textContent = 'Copied';
+          setTimeout(() => btn.textContent = old, 1200);
+        });
+      });
+    });
+  }
+
+  document.getElementById('searchBox').addEventListener('input', (e) => renderLog(e.target.value));
+
+  document.getElementById('addBtn').addEventListener('click', async () => {
+    const body = {
+      name: document.getElementById('fName').value.trim(),
+      model: document.getElementById('fModel').value.trim(),
+      os: document.getElementById('fOS').value.trim(),
+      serial: document.getElementById('fSerial').value.trim(),
+      imei: document.getElementById('fIMEI').value.trim(),
+      phone: document.getElementById('fPhone').value.trim(),
+      email: document.getElementById('fEmail').value.trim()
+    };
+    const res = await fetch('/api/entries', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    if(!res.ok){
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || 'Could not save entry.');
+      return;
+    }
+    await loadEntries();
+    ['fName','fModel','fOS','fSerial','fIMEI','fPhone','fEmail'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('imeiStrip').classList.remove('show');
+  });
+
+  loadEntries();
+  setInterval(loadEntries, 15000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Device Check-in — Share this device's location</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div class="wrap" style="max-width:560px;">
+
+  <header>
+    <div>
+      <p class="eyebrow">Run this on the device being tracked</p>
+      <h1>Device <span>Check-in</span></h1>
+      <p class="sub">This page only ever shares the location of <b>the phone or computer it's open on right now</b> — it cannot look up or report the location of any other device.</p>
+    </div>
+    <nav class="tabs">
+      <a href="index.html">Ledger</a>
+      <a href="checkin.html" class="active">Check-in</a>
+    </nav>
+  </header>
+
+  <div id="banner" class="banner banner-off">
+    Location sharing is <b>OFF</b>. Nothing is sent until you tap "Start sharing" below and grant your browser's location permission prompt.
+  </div>
+
+  <div class="panel">
+    <p class="panel-title">Identify this device</p>
+    <div class="field">
+      <label for="fType">Match this device in the ledger by</label>
+      <select id="fType">
+        <option value="serial">Serial number</option>
+        <option value="email">Owner email</option>
+        <option value="imei">IMEI</option>
+        <option value="phone">Phone number</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="fValue">Value</label>
+      <input id="fValue" placeholder="Must exactly match what's in the ledger">
+    </div>
+
+    <div class="actions">
+      <button class="btn-primary" id="startBtn">Start sharing my location</button>
+      <button class="btn-danger" id="stopBtn" style="display:none;">Stop sharing</button>
+    </div>
+    <p class="imei-note" id="statusLine" style="margin-top:14px;"></p>
+  </div>
+
+  <footer>DEVICE LEDGER · this device's coordinates are sent only while sharing is ON and this tab is open</footer>
+</div>
+
+<script>
+(function(){
+  const params = new URLSearchParams(location.search);
+  if(params.get('type')) document.getElementById('fType').value = params.get('type');
+  if(params.get('value')) document.getElementById('fValue').value = params.get('value');
+
+  const banner = document.getElementById('banner');
+  const statusLine = document.getElementById('statusLine');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const fType = document.getElementById('fType');
+  const fValue = document.getElementById('fValue');
+
+  let watchId = null;
+  let lastSentAt = 0;
+  const MIN_INTERVAL_MS = 10000; // don't spam the server faster than every 10s
+
+  function setBanner(mode, text){
+    banner.className = 'banner ' + (mode === 'live' ? 'banner-live' : mode === 'info' ? 'banner-info' : 'banner-off');
+    banner.innerHTML = text;
+  }
+
+  async function sendPosition(pos){
+    const now = Date.now();
+    if(now - lastSentAt < MIN_INTERVAL_MS) return;
+    lastSentAt = now;
+
+    const body = {
+      lookupType: fType.value,
+      lookupValue: fValue.value.trim(),
+      lat: pos.coords.latitude,
+      lon: pos.coords.longitude,
+      accuracy: pos.coords.accuracy
+    };
+    try{
+      const res = await fetch('/api/checkin', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if(!res.ok){
+        statusLine.textContent = 'Error: ' + (data.error || 'could not reach ledger.');
+        stopSharing();
+        return;
+      }
+      statusLine.textContent = `Last sent ${new Date().toLocaleTimeString()} — matched "${data.deviceName}" (±${Math.round(body.accuracy||0)}m).`;
+    }catch(e){
+      statusLine.textContent = 'Network error sending location: ' + e.message;
+    }
+  }
+
+  function startSharing(){
+    if(!fValue.value.trim()){
+      alert('Enter the value that matches this device\'s ledger entry first.');
+      return;
+    }
+    if(!('geolocation' in navigator)){
+      alert('This browser does not support geolocation.');
+      return;
+    }
+    watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        setBanner('live', `Location sharing is <b>ON</b> for ${fType.value} = ${escapeHtml(fValue.value)}. This banner stays visible the whole time sharing is active.`);
+        sendPosition(pos);
+      },
+      (err) => {
+        statusLine.textContent = 'Location error: ' + err.message;
+        stopSharing();
+      },
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+    );
+    startBtn.style.display = 'none';
+    stopBtn.style.display = '';
+    fType.disabled = true;
+    fValue.disabled = true;
+  }
+
+  function stopSharing(){
+    if(watchId !== null){
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+    setBanner('off', 'Location sharing is <b>OFF</b>. Nothing is sent until you tap "Start sharing" and grant permission.');
+    startBtn.style.display = '';
+    stopBtn.style.display = 'none';
+    fType.disabled = false;
+    fValue.disabled = false;
+  }
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  startBtn.addEventListener('click', startSharing);
+  stopBtn.addEventListener('click', stopSharing);
+
+  window.addEventListener('beforeunload', () => {
+    if(watchId !== null) navigator.geolocation.clearWatch(watchId);
+  });
+})();
+</script>
+</body>
+</html>
