@@ -1,10 +1,10 @@
 const bcrypt = require('bcryptjs');
 const { save } = require('../lib/adminStore');
 
-const [,, username, password] = process.argv;
+const [,, username, email, password] = process.argv;
 
-if (!username || !password) {
-  console.error('Usage: node scripts/set-admin-password.js <username> <password>');
+if (!username || !email || !password) {
+  console.error('Usage: node scripts/set-admin-password.js <username> <email> <password>');
   process.exit(1);
 }
 if (password.length < 8) {
@@ -13,5 +13,5 @@ if (password.length < 8) {
 }
 
 const passwordHash = bcrypt.hashSync(password, 12);
-save({ username, passwordHash });
-console.log(`Admin credentials saved for username "${username}".`);
+save({ username, email, passwordHash });
+console.log(`Admin credentials saved for username "${username}" / email "${email}".`);

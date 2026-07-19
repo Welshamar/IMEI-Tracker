@@ -62,7 +62,11 @@ app.post('/api/login', (req, res) => {
   const { username = '', password = '' } = req.body || {};
   const admin = adminStore.load();
 
-  const ok = admin && username === admin.username && bcrypt.compareSync(password, admin.passwordHash);
+  const identifierMatches = admin && (
+    username === admin.username ||
+    (admin.email && username.toLowerCase() === admin.email.toLowerCase())
+  );
+  const ok = identifierMatches && bcrypt.compareSync(password, admin.passwordHash);
   if (!ok) {
     const next = { count: (attempt ? attempt.count : 0) + 1, lockedUntil: 0 };
     if (next.count >= MAX_ATTEMPTS) next.lockedUntil = Date.now() + LOCKOUT_MS;
