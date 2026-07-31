@@ -112,6 +112,13 @@
 <script>
 (function(){
 
+  // ---- Auth gate (this page is a plain static file; the real security
+  // boundary is the /api/entries* endpoints, which always check the
+  // session server-side regardless of how this page was reached) ----
+  fetch('/api/whoami').then(r => r.json()).then(d => {
+    if (!d.loggedIn) location.href = '/login.html';
+  });
+
   // ---- IMEI Luhn visualizer (client-side preview only; server re-validates) ----
   function luhnCheck(digits){
     let sum = 0;

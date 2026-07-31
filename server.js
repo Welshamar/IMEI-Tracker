@@ -1,23 +1,37 @@
 const express = require('express');
 const session = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
 const bcrypt = require('bcryptjs');
 const path = require('path');
 const crypto = require('crypto');
-const { load, save } = require('./lib/store');
+const store = require('./lib/store');
 const { luhnCheck } = require('./lib/luhn');
 const adminStore = require('./lib/adminStore');
+const { getPool } = require('./lib/db');
 
 const app = express();
 const PORT = process.env.PORT || 3100;
 
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use(session({
-  secret: crypto.randomBytes(32).toString('hex'),
+  store: new pgSession({ pool: getPool(), createTableIfMissing: true }),
+  secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
   name: 'ledger.sid',
   resave: false,
   saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: 'lax', maxAge: 12 * 60 * 60 * 1000 }
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 12 * 60 * 60 * 1000
+  }
 }));
+
+// Static assets (public/*.html, shared.css, world-map.svg). On Vercel these
+// are served directly by the static builder per vercel.json; this is what
+// runs them for local dev (`node server.js`).
+app.use(express.static(path.join(__dirname, 'public')));
 
 function newId() {
   return Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
@@ -27,20 +41,28 @@ function normSerial(s) { return (s || '').trim().toUpperCase(); }
 function normEmail(s) { return (s || '').trim().toLowerCase(); }
 function normDigits(s) { return (s || '').replace(/\D/g, ''); }
 
+function asyncRoute(fn) {
+  return (req, res) => {
+    Promise.resolve(fn(req, res)).catch(err => {
+      console.error(err);
+      res.status(500).json({ error: 'Server error.' });
+    });
+  };
+}
+
 // ---- Auth ----
 // Everything below protects the ledger (viewing/adding/removing devices).
 // The device check-in flow (public/checkin.html + POST /api/checkin) is
 // intentionally left open — it must work for whoever is holding a tracked
-// device, who will not have admin credentials.
+// device, who will not have admin credentials. index.html itself is a
+// plain static file (no server-side page gate); it checks /api/whoami on
+// load and redirects to /login.html client-side if not authenticated. The
+// real security boundary is the /api/entries* endpoints below, which always
+// require a valid session regardless of how the page was reached.
 
 const failedAttempts = new Map(); // ip -> { count, lockedUntil }
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_MS = 5 * 60 * 1000;
-
-function requireAuthPage(req, res, next) {
-  if (req.session && req.session.isAdmin) return next();
-  res.redirect('/login.html');
-}
 
 function requireAuthApi(req, res, next) {
   if (req.session && req.session.isAdmin) return next();
@@ -51,7 +73,7 @@ app.get('/api/whoami', (req, res) => {
   res.json({ loggedIn: !!(req.session && req.session.isAdmin), username: req.session && req.session.username });
 });
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', asyncRoute(async (req, res) => {
   const ip = req.ip;
   const attempt = failedAttempts.get(ip);
   if (attempt && attempt.lockedUntil > Date.now()) {
@@ -60,7 +82,7 @@ app.post('/api/login', (req, res) => {
   }
 
   const { username = '', password = '' } = req.body || {};
-  const admin = adminStore.load();
+  const admin = await adminStore.load();
 
   const identifierMatches = admin && (
     username === admin.username ||
@@ -78,45 +100,32 @@ app.post('/api/login', (req, res) => {
   req.session.isAdmin = true;
   req.session.username = admin.username;
   res.json({ ok: true });
-});
+}));
 
 app.post('/api/logout', (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
-app.post('/api/change-password', requireAuthApi, (req, res) => {
+app.post('/api/change-password', requireAuthApi, asyncRoute(async (req, res) => {
   const { currentPassword = '', newPassword = '' } = req.body || {};
-  const admin = adminStore.load();
+  const admin = await adminStore.load();
   if (!admin || !bcrypt.compareSync(currentPassword, admin.passwordHash)) {
     return res.status(401).json({ error: 'Current password is incorrect.' });
   }
   if (newPassword.length < 8) {
     return res.status(400).json({ error: 'New password must be at least 8 characters.' });
   }
-  adminStore.save({ username: admin.username, passwordHash: bcrypt.hashSync(newPassword, 12) });
+  await adminStore.save({ username: admin.username, email: admin.email, passwordHash: bcrypt.hashSync(newPassword, 12) });
   res.json({ ok: true });
-});
-
-// ---- Protected pages ----
-// Explicit routes for the ledger page run before express.static so an
-// unauthenticated visitor is redirected to the login page instead of ever
-// receiving the ledger HTML.
-
-app.get(['/', '/index.html'], requireAuthPage, (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// login.html, checkin.html, shared.css, world-map.svg etc. stay public.
-app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+}));
 
 // ---- Entries (admin only) ----
 
-app.get('/api/entries', requireAuthApi, (req, res) => {
-  const db = load();
-  res.json(db.entries.slice().sort((a, b) => b.ts - a.ts));
-});
+app.get('/api/entries', requireAuthApi, asyncRoute(async (req, res) => {
+  res.json(await store.listEntries());
+}));
 
-app.post('/api/entries', requireAuthApi, (req, res) => {
+app.post('/api/entries', requireAuthApi, asyncRoute(async (req, res) => {
   const { name = '', model = '', os = '', serial = '', imei = '', phone = '', email = '' } = req.body || {};
 
   if (!name.trim() && !model.trim() && !serial.trim() && !normDigits(imei) && !normDigits(phone) && !email.trim()) {
@@ -129,8 +138,7 @@ app.post('/api/entries', requireAuthApi, (req, res) => {
     imeiValid = luhnCheck(imeiDigits.split('').map(Number)).valid;
   }
 
-  const db = load();
-  const entry = {
+  const entry = await store.createEntry({
     id: newId(),
     name: name.trim(),
     model: model.trim(),
@@ -140,31 +148,20 @@ app.post('/api/entries', requireAuthApi, (req, res) => {
     imeiValid,
     phone: phone.trim(),
     email: email.trim(),
-    ts: Date.now(),
-    lastLocation: null
-  };
-  db.entries.push(entry);
-  save(db);
+    ts: Date.now()
+  });
   res.status(201).json(entry);
-});
+}));
 
-app.delete('/api/entries/:id', requireAuthApi, (req, res) => {
-  const db = load();
-  const before = db.entries.length;
-  db.entries = db.entries.filter(e => e.id !== req.params.id);
-  db.locations = db.locations.filter(l => l.entryId !== req.params.id);
-  save(db);
-  if (db.entries.length === before) return res.status(404).json({ error: 'Not found' });
+app.delete('/api/entries/:id', requireAuthApi, asyncRoute(async (req, res) => {
+  const deleted = await store.deleteEntry(req.params.id);
+  if (!deleted) return res.status(404).json({ error: 'Not found' });
   res.json({ ok: true });
-});
+}));
 
-app.get('/api/entries/:id/locations', requireAuthApi, (req, res) => {
-  const db = load();
-  const history = db.locations
-    .filter(l => l.entryId === req.params.id)
-    .sort((a, b) => a.ts - b.ts);
-  res.json(history);
-});
+app.get('/api/entries/:id/locations', requireAuthApi, asyncRoute(async (req, res) => {
+  res.json(await store.listLocationHistory(req.params.id));
+}));
 
 // ---- Check-in (self-reported location, requires the device's own consent) ----
 // A device identifies itself by one of its own known identifiers and reports
@@ -173,7 +170,7 @@ app.get('/api/entries/:id/locations', requireAuthApi, (req, res) => {
 // Deliberately NOT behind requireAuthApi: the person checking in is the
 // device holder, not the ledger admin.
 
-app.post('/api/checkin', (req, res) => {
+app.post('/api/checkin', asyncRoute(async (req, res) => {
   const { lookupType, lookupValue, lat, lon, accuracy } = req.body || {};
 
   if (typeof lat !== 'number' || typeof lon !== 'number') {
@@ -186,42 +183,28 @@ app.post('/api/checkin', (req, res) => {
     return res.status(400).json({ error: 'lookupValue is required.' });
   }
 
-  const db = load();
-  let match = null;
+  let normalizedValue;
+  if (lookupType === 'serial') normalizedValue = normSerial(lookupValue);
+  else if (lookupType === 'email') normalizedValue = normEmail(lookupValue);
+  else normalizedValue = normDigits(lookupValue);
 
-  if (lookupType === 'serial') {
-    const v = normSerial(lookupValue);
-    match = db.entries.find(e => normSerial(e.serial) === v && v);
-  } else if (lookupType === 'email') {
-    const v = normEmail(lookupValue);
-    match = db.entries.find(e => normEmail(e.email) === v && v);
-  } else if (lookupType === 'imei') {
-    const v = normDigits(lookupValue);
-    match = db.entries.find(e => e.imei === v && v);
-  } else if (lookupType === 'phone') {
-    const v = normDigits(lookupValue);
-    match = db.entries.find(e => normDigits(e.phone) === v && v);
-  }
-
+  const match = await store.findEntry(lookupType, normalizedValue);
   if (!match) {
     return res.status(404).json({ error: 'No ledger entry matches that identifier. Ask the ledger owner to add this device first.' });
   }
 
-  const locEntry = {
-    id: newId(),
-    entryId: match.id,
-    lat,
-    lon,
-    accuracy: typeof accuracy === 'number' ? accuracy : null,
-    ts: Date.now()
-  };
-  db.locations.push(locEntry);
-  match.lastLocation = { lat, lon, accuracy: locEntry.accuracy, ts: locEntry.ts };
-  save(db);
+  const ts = Date.now();
+  const normalizedAccuracy = typeof accuracy === 'number' ? accuracy : null;
+  await store.addLocationHistory({ id: newId(), entryId: match.id, lat, lon, accuracy: normalizedAccuracy, ts });
+  await store.updateEntryLocation(match.id, { lat, lon, accuracy: normalizedAccuracy, ts });
 
   res.json({ ok: true, deviceName: match.name || match.model || 'Unnamed device' });
-});
+}));
 
-app.listen(PORT, () => {
-  console.log(`Device Ledger running at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Device Ledger running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;

@@ -1,5 +1,7 @@
+require('dotenv').config({ path: '.env.local' });
 const bcrypt = require('bcryptjs');
-const { save } = require('../lib/adminStore');
+const adminStore = require('../lib/adminStore');
+const { getPool } = require('../lib/db');
 
 const [,, username, email, password] = process.argv;
 
@@ -12,6 +14,12 @@ if (password.length < 8) {
   process.exit(1);
 }
 
-const passwordHash = bcrypt.hashSync(password, 12);
-save({ username, email, passwordHash });
-console.log(`Admin credentials saved for username "${username}" / email "${email}".`);
+(async () => {
+  const passwordHash = bcrypt.hashSync(password, 12);
+  await adminStore.save({ username, email, passwordHash });
+  console.log(`Admin credentials saved for username "${username}" / email "${email}".`);
+  await getPool().end();
+})().catch(err => {
+  console.error('Failed to save admin credentials:', err.message);
+  process.exit(1);
+});

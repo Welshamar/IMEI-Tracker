@@ -5,11 +5,15 @@
   "description": "Device ledger with IMEI validation and consent-based device check-in locations",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "migrate": "node scripts/migrate.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "connect-pg-simple": "^10.0.0",
+    "dotenv": "^17.4.2",
     "express": "^4.19.2",
-    "express-session": "^1.19.0"
+    "express-session": "^1.19.0",
+    "pg": "^8.22.0"
   }
 }
